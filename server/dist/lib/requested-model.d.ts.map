@@ -1,0 +1,1 @@
+{"version":3,"file":"requested-model.d.ts","sourceRoot":"","sources":["../../src/lib/requested-model.ts"],"names":[],"mappings":"AACA,OAAO,KAAK,EAAE,EAAE,EAAE,MAAM,gBAAgB,CAAC;AACzC,OAAO,EAAqC,KAAK,UAAU,EAAE,MAAM,6BAA6B,CAAC;AAMjG,wBAAgB,6BAA6B,CAAC,EAAE,EAAE,EAAE,EAAE,MAAM,EAAE,UAAU,EAAE,GAAG,OAAO,CAqBnF;AAED,wBAAgB,wBAAwB,CAAC,KAAK,SAAK,EAAE,UAAU,UAAQ,GAAG,MAAM,CAa/E"}

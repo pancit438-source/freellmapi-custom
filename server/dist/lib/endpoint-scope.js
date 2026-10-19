@@ -1,0 +1,121 @@
+// ── Endpoint identity for custom relay models (#651) ────────────────────────
+//
+// Every custom relay is stored under platform = 'custom', so two relays that
+// both offer `deepseek-v3.1` used to collapse into ONE `models` row: one
+// enabled flag, one reliability/speed bucket, one binding anchor. Disabling the
+// model because relay A was broken disabled it for relay B too, and relay A's
+// timeouts dragged down the copy relay B served just fine (#619).
+//
+// The discriminator is `models.endpoint_scope`: the normalized base_url of the
+// endpoint the row belongs to, '' for every catalog platform. Uniqueness is
+// (platform, model_id, endpoint_scope), so catalog rows keep exactly their old
+// (platform, model_id) semantics — '' is the same value for all of them — while
+// two relays can each hold their own row for the same model id.
+//
+// Why base_url and not key_id: #640 settled that an endpoint is a base_url
+// holding a POOL of credentials, and a model rotates across that pool. Keying
+// identity on key_id would split one relay's model into one row per credential
+// and undo that. Why a TEXT token and not a foreign key: the scope is opaque to
+// everything except this module, so the per-key model groups of #657 can later
+// refine it (`<base_url>#<group>`) without a second identity migration.
+/** Trailing-slash-insensitive endpoint identity, matching how base_url is stored. */
+export function normalizeBaseUrl(raw) {
+    return raw.trim().replace(/\/+$/, '');
+}
+/** The scope token for a custom endpoint; '' means "not endpoint-scoped". */
+export function endpointScopeForBaseUrl(baseUrl) {
+    return baseUrl ? normalizeBaseUrl(baseUrl) : '';
+}
+/**
+ * The scope a model bound to `keyId` belongs to. '' when the key is gone or
+ * carries no base_url — a legacy custom row that predates per-endpoint binding
+ * keeps the un-scoped identity it has always had, so nothing about it changes.
+ */
+export function endpointScopeOfKey(db, keyId) {
+    if (keyId == null)
+        return '';
+    const row = db.prepare("SELECT base_url FROM api_keys WHERE id = ? AND platform = 'custom'")
+        .get(keyId);
+    return endpointScopeForBaseUrl(row?.base_url);
+}
+/**
+ * A short, typable handle for a scope, used only for naming: the host (with
+ * port) plus path, slugified. Derived purely from the scope, so it is stable —
+ * adding or removing OTHER endpoints never renames an existing one.
+ *
+ *   https://relay-a.example.com/v1  →  relay-a.example.com-v1
+ *   http://127.0.0.1:11434/v1       →  127.0.0.1-11434-v1
+ */
+export function endpointHandle(scope) {
+    const withoutScheme = scope.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+    const slug = withoutScheme
+        .toLowerCase()
+        .replace(/[^a-z0-9.]+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^[-.]+|[-.]+$/g, '');
+    return slug || 'endpoint';
+}
+/**
+ * The bucket key for reliability/speed stats and the routing round-robin.
+ * Unchanged (`platform:model_id`) for every catalog model and for un-scoped
+ * legacy custom rows; endpoint-qualified only for rows that actually carry a
+ * scope, so a single-endpoint install keeps its existing history verbatim.
+ */
+/** Actual endpoint identity behind the local per-key legacy discriminator. */
+export function canonicalEndpointScope(scope) {
+    return (scope ?? '').replace(/#legacy-key:\d+$/, '');
+}
+/** Reuse a surviving legacy row when registration refreshes an old endpoint. */
+export function customModelScopeForRegistration(db, modelId, scope, keyId) {
+    const rows = db.prepare("SELECT endpoint_scope, key_id FROM models WHERE platform = 'custom' AND model_id = ? ORDER BY id")
+        .all(modelId);
+    const candidates = rows.filter(row => canonicalEndpointScope(row.endpoint_scope) === scope);
+    const matchingKey = candidates.find(row => row.key_id === keyId);
+    if (matchingKey)
+        return matchingKey.endpoint_scope;
+    const canonical = candidates.find(row => row.endpoint_scope === scope);
+    // A historical per-key endpoint keeps new models per key too. Ordinary
+    // endpoints still share one canonical row; a deleted canonical continues
+    // to reuse a survivor so registration cannot recreate a removed identity.
+    if (canonical?.key_id != null && canonical.key_id !== keyId) {
+        const legacyRows = db.prepare("SELECT endpoint_scope FROM models WHERE platform = 'custom' AND endpoint_scope LIKE '%#legacy-key:%'")
+            .all();
+        if (legacyRows.some(row => canonicalEndpointScope(row.endpoint_scope) === scope)) {
+            return `${scope}#legacy-key:${keyId}`;
+        }
+    }
+    return (canonical ?? candidates[0])?.endpoint_scope ?? scope;
+}
+export function modelStatsKey(platform, modelId, endpointScope) {
+    const scope = platform === 'custom' ? canonicalEndpointScope(endpointScope) : '';
+    return scope ? `${platform}:${modelId}@${scope}` : `${platform}:${modelId}`;
+}
+// The separator between a member id and its endpoint handle. '#' reads as a
+// fragment and — unlike ':', '@' or '/' — does not occur in provider model ids.
+export const ENDPOINT_ID_SEPARATOR = '#';
+/**
+ * The endpoint-qualified model id a client can send to pin ONE relay's copy:
+ * `custom:deepseek-v3.1#relay-a.example.com-v1`. Null for rows with no scope,
+ * whose plain `platform:model_id` member id is already unambiguous — which is
+ * why a single-endpoint install never sees a qualified id anywhere.
+ */
+export function qualifiedModelMemberId(platform, modelId, endpointScope) {
+    if (platform !== 'custom' || !endpointScope)
+        return null;
+    return `${platform}:${modelId}${ENDPOINT_ID_SEPARATOR}${endpointHandle(endpointScope)}`;
+}
+/**
+ * Whether `requested` names this row's endpoint after the separator. Accepts
+ * the handle or the raw base_url (with or without scheme / trailing slash), so
+ * a user who pastes the endpoint URL they typed into the dashboard is right.
+ */
+export function endpointRefMatches(requested, endpointScope) {
+    const ref = requested.trim();
+    if (!ref || !endpointScope)
+        return false;
+    // Slugifying BOTH sides is what makes the handle and the raw URL equivalent:
+    // endpointHandle is idempotent, so handle→handle and url→handle both land on
+    // the same token.
+    return endpointHandle(ref) === endpointHandle(endpointScope);
+}
+//# sourceMappingURL=endpoint-scope.js.map
